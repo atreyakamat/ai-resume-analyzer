@@ -1,5 +1,5 @@
-import { GoogleGenAI, Type } from "@google/genai";
 import { NextResponse } from "next/server";
+import { ollamaService } from "@/lib/ollama";
 
 export async function POST(req: Request) {
   try {
@@ -12,15 +12,16 @@ export async function POST(req: Request) {
       );
     }
 
-    const apiKey = process.env.NEXT_PUBLIC_GEMINI_API_KEY;
-    if (!apiKey) {
+    // Check if Ollama is available
+    const isHealthy = await ollamaService.checkHealth();
+    if (!isHealthy) {
       return NextResponse.json(
-        { error: "Gemini API key is not configured." },
-        { status: 500 }
+        {
+          error: `Ollama is not running or model '${ollamaService.getModel()}' is not available. Please ensure Ollama is running and the model is pulled (e.g., 'ollama pull ${ollamaService.getModel()}').`,
+        },
+        { status: 503 }
       );
     }
-
-    const ai = new GoogleGenAI({ apiKey });
 
     const prompt = `You are an expert ATS (Applicant Tracking System) and professional resume reviewer.
 Analyze the following resume text and provide structured feedback.
@@ -44,61 +45,46 @@ Provide your feedback in the following JSON format:
   ],
   "rewrittenSummary": "A professional, compelling summary section rewritten for impact."
 }
-`;
 
-    const response = await ai.models.generateContent({
-      model: "gemini-3.1-pro-preview",
-      contents: prompt,
-      config: {
-        responseMimeType: "application/json",
-        responseSchema: {
-          type: Type.OBJECT,
-          properties: {
-            overallFeedback: {
-              type: Type.STRING,
-              description: "A concise paragraph summarizing the resume's strengths and weaknesses.",
-            },
-            bulletImprovements: {
-              type: Type.ARRAY,
-              items: {
-                type: Type.OBJECT,
-                properties: {
-                  original: { type: Type.STRING },
-                  improved: { type: Type.STRING },
-                },
-                required: ["original", "improved"],
-              },
-            },
-            atsOptimizationTips: {
-              type: Type.ARRAY,
-              items: { type: Type.STRING },
-            },
-            rewrittenSummary: {
-              type: Type.STRING,
-            },
-          },
-          required: [
-            "overallFeedback",
-            "bulletImprovements",
-            "atsOptimizationTips",
-            "rewrittenSummary",
-          ],
-        },
-      },
+Important: Return ONLY valid JSON without any markdown formatting or code blocks.`;
+
+    const responseText = await ollamaService.generate(prompt, {
+      format: "json",
+      temperature: 0.7,
     });
 
-    const resultText = response.text;
-    if (!resultText) {
-      throw new Error("No response from Gemini API");
+    if (!responseText) {
+      throw new Error("No response from Ollama API");
     }
 
-    const result = JSON.parse(resultText);
+    // Parse the JSON response
+    let result;
+    try {
+      result = JSON.parse(responseText);
+    } catch (parseError) {
+      console.error("Failed to parse Ollama response:", responseText);
+      throw new Error("Invalid JSON response from AI model");
+    }
+
+    // Validate the response structure
+    if (
+      !result.overallFeedback ||
+      !result.bulletImprovements ||
+      !result.atsOptimizationTips ||
+      !result.rewrittenSummary
+    ) {
+      throw new Error("Incomplete response from AI model");
+    }
+
     return NextResponse.json(result);
   } catch (error) {
     console.error("Error analyzing resume:", error);
-    return NextResponse.json(
-      { error: "Failed to analyze resume. Please try again." },
-      { status: 500 }
-    );
+
+    const errorMessage =
+      error instanceof Error
+        ? error.message
+        : "Failed to analyze resume. Please try again.";
+
+    return NextResponse.json({ error: errorMessage }, { status: 500 });
   }
 }
